@@ -23,6 +23,10 @@
 # \e[K  => clears everything after the cursor on the current line
 # \e[2K => clear everything on the current line
 
+PROMPT_PREFIX_TOP='╭─'
+PROMPT_PREFIX_BOTTOM='╰─'
+RPROMPT_LINE_UP='%{'$'\e[1A''%}' # one line up
+RPROMPT_LINE_DOWN='%{'$'\e[1B''%}' # one line down
 
 # turns seconds into human readable time
 # 165392 => 1d 21h 56m 32s
@@ -109,34 +113,45 @@ prompt_pure_string_length_to_var() {
 	typeset -g "${var}"="${length}"
 }
 
+prompt_pure_colour_for_exit_code() {
+	# Ignore spurious `git log` exit code of 141. (Reasonably unlikely to be seen elsewhere,
+	# so can't be bothered to check if that was the command executed.)
+	print -n '%(141?.%F{white}.%(?.%F{white}.%F{red}))'
+}
+
 prompt_pure_preprompt_render() {
 	setopt localoptions noshwordsplit
 
 	# Set color for git branch/dirty status, change color if dirty checking has
 	# been delayed.
-	local git_color=242
+	local git_color=101 #242
 	[[ -n ${prompt_pure_git_last_dirty_check_timestamp+x} ]] && git_color=red
 
 	# Initialize the preprompt array.
 	local -a preprompt_parts
+	local -a preprompt_r_parts
 
 	# Set the path.
-	preprompt_parts+=('%F{blue}%~%f')
+	preprompt_parts+=('$(prompt_pure_colour_for_exit_code)'$PROMPT_PREFIX_TOP' %F{12}%~%f')
 
 	# Add git branch and dirty status info.
 	typeset -gA prompt_pure_vcs_info
 	if [[ -n $prompt_pure_vcs_info[branch] ]]; then
-		preprompt_parts+=("%F{$git_color}"'${prompt_pure_vcs_info[branch]}${prompt_pure_git_dirty}%f')
+		preprompt_parts+=("%F{052}${prompt_pure_git_dirty}%F{$git_color}"$(print -- "\uF126")' ${prompt_pure_vcs_info[branch]}%f')
 	fi
 	# Git pull/push arrows.
 	if [[ -n $prompt_pure_git_arrows ]]; then
 		preprompt_parts+=('%F{cyan}${prompt_pure_git_arrows}%f')
 	fi
+	# Git tag info.
+	if [[ -n prompt_pure_git_tag_and_commit ]]; then
+		preprompt_parts+=("%F{$git_color}"'${prompt_pure_git_tag_and_commit}%f')
+	fi
 
 	# Username and machine, if applicable.
 	[[ -n $prompt_pure_username ]] && preprompt_parts+=('$prompt_pure_username')
 	# Execution time.
-	[[ -n $prompt_pure_cmd_exec_time ]] && preprompt_parts+=('%F{yellow}${prompt_pure_cmd_exec_time}%f')
+	[[ -n $prompt_pure_cmd_exec_time ]] && preprompt_r_parts+=('%F{yellow}${prompt_pure_cmd_exec_time}%f')
 
 	local cleaned_ps1=$PROMPT
 	local -H MATCH MBEGIN MEND
@@ -159,6 +174,11 @@ prompt_pure_preprompt_render() {
 	)
 
 	PROMPT="${(j..)ps1}"
+
+	if [[ -n $preprompt_r_parts ]]; then
+		preprompt_r_parts=("$RPROMPT_LINE_UP" "${preprompt_r_parts[@]}" "$RPROMPT_LINE_DOWN")
+		RPROMPT="${(j..)preprompt_r_parts}"
+	fi
 
 	# Expand the prompt for future comparision.
 	local expanded_prompt
@@ -261,10 +281,47 @@ prompt_pure_async_git_dirty() {
 	return $?
 }
 
+prompt_pure_debug_output() {
+	#echo -e "$(command date +"%Y-%m-%dT%H:%M:%S") $1" >>~/my_prompt.log
+}
+
+prompt_pure_is_bluetooth_network_connection() {
+	services=$(networksetup -listnetworkserviceorder | grep 'Hardware Port')
+
+	while read line; do
+		sname=$(echo $line | awk -F  "(, )|(: )|[)]" '{print $2}')
+		sdev=$(echo $line | awk -F  "(, )|(: )|[)]" '{print $4}')
+		if [ -n "$sdev" ]; then
+			ifout="$(ifconfig $sdev 2>/dev/null)"
+			echo "$ifout" | grep 'status: active' > /dev/null 2>&1
+			rc="$?"
+			if [ "$rc" -eq 0 ]; then
+				currentservice="$sname"
+				currentdevice="$sdev"
+				currentmac=$(echo "$ifout" | awk '/ether/{print $2}')
+			fi
+		fi
+	done <<< "$(echo "$services")"
+
+	prompt_pure_debug_output "Current service is ${currentservice:-?}"
+	if [ -n "$currentservice" ]; then
+		if [[ $currentservice == *Bluetooth* ]]; then
+			return 0
+		fi
+	fi
+	return 1
+}
+
 prompt_pure_async_git_fetch() {
 	setopt localoptions noshwordsplit
 	# use cd -q to avoid side effects of changing directory, e.g. chpwd hooks
 	builtin cd -q $1
+
+	if prompt_pure_is_bluetooth_network_connection; then
+		prompt_pure_debug_output "Skipping fetch; on bluetooth"
+		return 1
+	fi
+	prompt_pure_debug_output "Allowing fetch; not on bluetooth"
 
 	# set GIT_TERMINAL_PROMPT=0 to disable auth prompting for git fetch (git 2.3+)
 	export GIT_TERMINAL_PROMPT=0
@@ -283,6 +340,34 @@ prompt_pure_async_git_arrows() {
 	command git rev-list --left-right --count HEAD...@'{u}'
 }
 
+prompt_pure_async_git_tag_and_commit() {
+	setopt localoptions noshwordsplit
+
+	builtin cd -q $1
+
+	local tag=$(command git describe --tags --exact-match HEAD 2>/dev/null)
+	if [[ -n "${tag}" ]] ; then
+		tag="\uF02B ${tag} "
+	fi
+
+	print -- "${tag}\uE729 $(command git rev-parse --short=8 HEAD 2>/dev/null)"
+}
+
+prompt_pure_reset_async_state() {
+	reset_all=${1:-false}
+
+	unset prompt_pure_git_dirty
+	unset prompt_pure_git_arrows
+	unset prompt_pure_git_tag_and_commit
+	prompt_pure_vcs_info[branch]=
+	prompt_pure_vcs_info[top]=
+
+	if [[ $reset_all == true ]]; then
+		unset prompt_pure_git_last_dirty_check_timestamp
+		unset prompt_pure_git_fetch_pattern
+	fi
+}
+
 prompt_pure_async_tasks() {
 	setopt localoptions noshwordsplit
 
@@ -297,16 +382,8 @@ prompt_pure_async_tasks() {
 
 	local -H MATCH MBEGIN MEND
 	if ! [[ $PWD = ${prompt_pure_vcs_info[pwd]}* ]]; then
-		# stop any running async jobs
 		async_flush_jobs "prompt_pure"
-
-		# reset git preprompt variables, switching working tree
-		unset prompt_pure_git_dirty
-		unset prompt_pure_git_last_dirty_check_timestamp
-		unset prompt_pure_git_arrows
-		unset prompt_pure_git_fetch_pattern
-		prompt_pure_vcs_info[branch]=
-		prompt_pure_vcs_info[top]=
+		prompt_pure_reset_async_state true
 	fi
 	unset MATCH MBEGIN MEND
 
@@ -329,6 +406,7 @@ prompt_pure_async_refresh() {
 	fi
 
 	async_job "prompt_pure" prompt_pure_async_git_arrows $PWD
+	async_job "prompt_pure" prompt_pure_async_git_tag_and_commit $PWD
 
 	# do not preform git fetch if it is disabled or working_tree == HOME
 	if (( ${PURE_GIT_PULL:-1} )) && [[ $working_tree != $HOME ]]; then
@@ -345,12 +423,18 @@ prompt_pure_async_refresh() {
 	fi
 }
 
+prompt_pure_print_all_colours() {
+	for code in {000..255}; do
+		print -P -- "%F{$code}$code%{$reset_color%}"
+	done
+}
+
 prompt_pure_check_git_arrows() {
 	setopt localoptions noshwordsplit
 	local arrows left=${1:-0} right=${2:-0}
 
-	(( right > 0 )) && arrows+=${PURE_GIT_DOWN_ARROW:-⇣}
-	(( left > 0 )) && arrows+=${PURE_GIT_UP_ARROW:-⇡}
+	(( right > 0 )) && arrows+=${PURE_GIT_DOWN_ARROW:-$(print -- "\uF01A")}
+	(( left > 0 )) && arrows+=${PURE_GIT_UP_ARROW:-$(print -- "\uF01B")}
 
 	[[ -n $arrows ]] || return
 	typeset -g REPLY=$arrows
@@ -384,7 +468,7 @@ prompt_pure_async_callback() {
 
 			# update has a git toplevel set which means we just entered a new
 			# git directory, run the async refresh tasks
-			[[ -n $info[top] ]] && [[ -z $prompt_pure_vcs_info[top] ]] && prompt_pure_async_refresh
+			[[ -n $info[top] ]] && [[ -z $prompt_pure_vcs_info[top] ]] && prompt_pure_reset_async_state && prompt_pure_async_refresh
 
 			# always update branch and toplevel
 			prompt_pure_vcs_info[branch]=$info[branch]
@@ -403,7 +487,7 @@ prompt_pure_async_callback() {
 			if (( code == 0 )); then
 				unset prompt_pure_git_dirty
 			else
-				typeset -g prompt_pure_git_dirty="*"
+				typeset -g prompt_pure_git_dirty="* "
 			fi
 
 			[[ $prev_dirty != $prompt_pure_git_dirty ]] && do_render=1
@@ -432,6 +516,14 @@ prompt_pure_async_callback() {
 					do_render=1
 				fi
 			fi
+			;;
+		prompt_pure_async_git_tag_and_commit)
+			if (( code == 0 )); then
+				typeset -g prompt_pure_git_tag_and_commit=$output
+			else
+				unset prompt_pure_git_tag_and_commit
+			fi
+			do_render=1
 			;;
 	esac
 
@@ -479,8 +571,7 @@ prompt_pure_setup() {
 	# if a virtualenv is activated, display it in grey
 	PROMPT='%(12V.%F{242}%12v%f .)'
 
-	# prompt turns red if the previous command didn't exit with 0
-	PROMPT+='%(?.%F{magenta}.%F{red})${PURE_PROMPT_SYMBOL:-❯}%f '
+	PROMPT+='$(prompt_pure_colour_for_exit_code)'$PROMPT_PREFIX_BOTTOM'%f '
 }
 
 prompt_pure_setup "$@"
