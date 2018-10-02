@@ -28,6 +28,8 @@ PROMPT_PREFIX_BOTTOM='╰─'
 RPROMPT_LINE_UP='%{'$'\e[1A''%}' # one line up
 RPROMPT_LINE_DOWN='%{'$'\e[1B''%}' # one line down
 
+export VIRTUAL_ENV_DISABLE_PROMPT=1
+
 # turns seconds into human readable time
 # 165392 => 1d 21h 56m 32s
 # https://github.com/sindresorhus/pretty-time-zsh
@@ -108,11 +110,6 @@ prompt_pure_preexec() {
 	if [[ $2 != set-tab-title* ]]; then
 		prompt_pure_set_title 'ignore-escape' "$2"
 	fi
-
-	# Disallow python virtualenv from updating the prompt, set it to 12 if
-	# untouched by the user to indicate that Pure modified it. Here we use
-	# magic number 12, same as in psvar.
-	export VIRTUAL_ENV_DISABLE_PROMPT=${VIRTUAL_ENV_DISABLE_PROMPT:-12}
 }
 
 # string length ignoring ansi escapes
@@ -143,8 +140,16 @@ prompt_pure_preprompt_render() {
 	local -a preprompt_parts
 	local -a preprompt_r_parts
 
+	preprompt_parts+=('$(prompt_pure_colour_for_exit_code)'$PROMPT_PREFIX_TOP)
+
 	# Set the path.
-	preprompt_parts+=('$(prompt_pure_colour_for_exit_code)'$PROMPT_PREFIX_TOP' %F{12}%~%f')
+	preprompt_parts+=('%F{12}%~%f')
+
+	# if a virtualenv is activated, display it in grey
+	local _conda=$CONDA_ENV_PATH$CONDA_PREFIX
+	if [[ ! -z "$_conda" && $CONDA_PREFIX =~ .+/envs/.+ ]]; then
+		preprompt_parts+=('%F{242}'$(print -- "\UE73C ")$(basename $_conda)'%f')
+	fi
 
 	# Add git branch and dirty status info.
 	typeset -gA prompt_pure_vcs_info
@@ -213,16 +218,6 @@ prompt_pure_precmd() {
 
 	# preform async git dirty check and fetch
 	prompt_pure_async_tasks
-
-	# Check if we should display the virtual env, we use a sufficiently high
-	# index of psvar (12) here to avoid collisions with user defined entries.
-	psvar[12]=
-	# When VIRTUAL_ENV_DISABLE_PROMPT is empty, it was unset by the user and
-	# Pure should take back control.
-	if [[ -n $VIRTUAL_ENV ]] && [[ -z $VIRTUAL_ENV_DISABLE_PROMPT || $VIRTUAL_ENV_DISABLE_PROMPT = 12 ]]; then
-		psvar[12]="${VIRTUAL_ENV:t}"
-		export VIRTUAL_ENV_DISABLE_PROMPT=12
-	fi
 
 	# print the preprompt
 	prompt_pure_preprompt_render "precmd"
@@ -579,10 +574,7 @@ prompt_pure_setup() {
 	# show username@host if root, with username in white
 	[[ $UID -eq 0 ]] && prompt_pure_username='%F{white}%n%f%F{242}@%m%f'
 
-	# if a virtualenv is activated, display it in grey
-	PROMPT='%(12V.%F{242}%12v%f .)'
-
-	PROMPT+='$(prompt_pure_colour_for_exit_code)'$PROMPT_PREFIX_BOTTOM'%f '
+	PROMPT='$(prompt_pure_colour_for_exit_code)'$PROMPT_PREFIX_BOTTOM'%f '
 }
 
 prompt_pure_setup "$@"
