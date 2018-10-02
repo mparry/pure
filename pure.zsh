@@ -67,18 +67,28 @@ prompt_pure_set_title() {
 		/dev/ttyS[0-9]*) return;;
 	esac
 
-	# tell the terminal we are setting the title
-	print -n '\e]0;'
-	# show hostname if connected through ssh
-	[[ -n $SSH_CONNECTION ]] && print -Pn '(%m) '
-	case $1 in
-		expand-prompt)
-			print -Pn $2;;
-		ignore-escape)
-			print -rn $2;;
-	esac
-	# end set title
-	print -n '\a'
+	if [[ $1 != "restore" ]]; then
+		prompt_pure_debug_output "Setting terminal title to: $2"
+		# Store current title
+		print -n '\033[22;0t'
+		# tell the terminal we are setting the title
+		print -n '\e]0;'
+		# show hostname if connected through ssh
+		[[ -n $SSH_CONNECTION ]] && print -Pn '(%m) '
+		case $1 in
+			expand-prompt)
+				print -Pn $2;;
+			ignore-escape)
+				print -rn $2;;
+			restore)
+		esac
+		# end set title
+		print -n '\a'
+	else
+		prompt_pure_debug_output "Restoring previous terminal title"
+		print -n '\033[23;0t'
+	fi
+	prompt_pure_debug_output "prompt_pure_set_title done"
 }
 
 prompt_pure_preexec() {
@@ -95,7 +105,9 @@ prompt_pure_preexec() {
 	typeset -g prompt_pure_cmd_timestamp=$EPOCHSECONDS
 
 	# shows the current dir and executed command in the title while a process is active
-	prompt_pure_set_title 'ignore-escape' "$PWD:t: $2"
+	if [[ $2 != set-tab-title* ]]; then
+		prompt_pure_set_title 'ignore-escape' "$2"
+	fi
 
 	# Disallow python virtualenv from updating the prompt, set it to 12 if
 	# untouched by the user to indicate that Pure modified it. Here we use
@@ -197,8 +209,7 @@ prompt_pure_precmd() {
 	prompt_pure_check_cmd_exec_time
 	unset prompt_pure_cmd_timestamp
 
-	# shows the full path in the title
-	prompt_pure_set_title 'expand-prompt' '%~'
+	prompt_pure_set_title 'restore'
 
 	# preform async git dirty check and fetch
 	prompt_pure_async_tasks
