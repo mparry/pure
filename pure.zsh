@@ -34,27 +34,28 @@ export VIRTUAL_ENV_DISABLE_PROMPT=1
 # 165392 => 1d 21h 56m 32s
 # https://github.com/sindresorhus/pretty-time-zsh
 prompt_pure_human_time_to_var() {
-	local human total_seconds=$1 var=$2
-	local days=$(( total_seconds / 60 / 60 / 24 ))
-	local hours=$(( total_seconds / 60 / 60 % 24 ))
-	local minutes=$(( total_seconds / 60 % 60 ))
-	local seconds=$(( total_seconds % 60 ))
-	(( days > 0 )) && human+="${days}d "
-	(( hours > 0 )) && human+="${hours}h "
-	(( minutes > 0 )) && human+="${minutes}m "
-	human+="${seconds}s"
-
-	# store human readable time in variable as specified by caller
-	typeset -g "${var}"="${human}"
+	local human total_seconds=$1
+	if (( total_seconds > 60 )); then
+		local days=$(( total_seconds / 60 / 60 / 24 ))
+		local hours=$(( total_seconds / 60 / 60 % 24 ))
+		local minutes=$(( total_seconds / 60 % 60 ))
+		local seconds=$(( total_seconds % 60 ))
+		(( days > 0 )) && human+="${days}d "
+		(( hours > 0 )) && human+="${hours}h "
+		(( minutes > 0 )) && human+="${minutes}m "
+		human+="${seconds}s"
+	else
+		typeset -F 1 total_seconds
+		human="${total_seconds}s"
+	fi
+	print -- "$human"
 }
 
-# stores (into prompt_pure_cmd_exec_time) the exec time of the last command if set threshold was exceeded
 prompt_pure_check_cmd_exec_time() {
 	integer elapsed
-	(( elapsed = EPOCHSECONDS - ${prompt_pure_last_cmd_timestamp:-$EPOCHSECONDS} ))
-	typeset -g prompt_pure_cmd_exec_time=
-	(( elapsed > ${PURE_CMD_MAX_EXEC_TIME:-5} )) && {
-		prompt_pure_human_time_to_var $elapsed "prompt_pure_cmd_exec_time"
+	(( elapsed = EPOCHREALTIME - ${prompt_pure_last_cmd_timestamp:-$EPOCHREALTIME} ))
+	(( elapsed > ${PURE_CMD_MAX_EXEC_TIME:-2} )) && {
+		print -- "$(prompt_pure_human_time_to_var $elapsed)"
 	}
 }
 
@@ -96,7 +97,7 @@ prompt_pure_set_title() {
 prompt_pure_accept_line() {
 	prompt_pure_debug_output "Handling accept-line"
 
-	typeset -g prompt_pure_last_cmd_timestamp=$EPOCHSECONDS
+	typeset -g prompt_pure_last_cmd_timestamp=$EPOCHREALTIME
 
 	# Re-render prompt, now with timestamp
 	typeset -g prompt_pure_show_timestamp=true
@@ -185,8 +186,6 @@ prompt_pure_preprompt_render() {
 	# Username and machine, if applicable.
 	[[ -n $prompt_pure_username ]] && preprompt_parts+=('$prompt_pure_username')
 
-	# Execution time.
-	[[ -n $prompt_pure_cmd_exec_time ]] && preprompt_r_parts+=('%F{088}$(print -- \\uF252) ${prompt_pure_cmd_exec_time}%f')
 	# Timestamp.
 	if [[ $prompt_pure_show_timestamp == true ]]; then
 		local timestamp_str=$(command date --date="@$prompt_pure_last_cmd_timestamp" +' %a %H:%M:%S')
@@ -241,8 +240,8 @@ prompt_pure_precmd() {
 	prompt_pure_debug_output "Handling precmd"
 
 	# check exec time and store it in a variable
-	prompt_pure_check_cmd_exec_time
-	unset prompt_pure_last_cmd_timestamp
+	elapsed=$(prompt_pure_check_cmd_exec_time)
+	[[ -n $elapsed ]] && print -P -- "%F{088}\\uF252 $elapsed%f"
 
 	prompt_pure_set_title "restore"
 
@@ -318,7 +317,7 @@ prompt_pure_async_git_dirty() {
 }
 
 prompt_pure_debug_output() {
-	echo -e "$(command date +"%Y-%m-%dT%H:%M:%S") $1" >>~/my_prompt.log
+	#echo -e "$(command date +"%Y-%m-%dT%H:%M:%S") $1" >>~/my_prompt.log
 }
 
 #prompt_pure_is_bluetooth_network_connection() {
