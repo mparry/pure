@@ -51,7 +51,7 @@ prompt_pure_human_time_to_var() {
 # stores (into prompt_pure_cmd_exec_time) the exec time of the last command if set threshold was exceeded
 prompt_pure_check_cmd_exec_time() {
 	integer elapsed
-	(( elapsed = EPOCHSECONDS - ${prompt_pure_cmd_timestamp:-$EPOCHSECONDS} ))
+	(( elapsed = EPOCHSECONDS - ${prompt_pure_last_cmd_timestamp:-$EPOCHSECONDS} ))
 	typeset -g prompt_pure_cmd_exec_time=
 	(( elapsed > ${PURE_CMD_MAX_EXEC_TIME:-5} )) && {
 		prompt_pure_human_time_to_var $elapsed "prompt_pure_cmd_exec_time"
@@ -93,7 +93,24 @@ prompt_pure_set_title() {
 	prompt_pure_debug_output "prompt_pure_set_title done"
 }
 
+prompt_pure_accept_line() {
+	prompt_pure_debug_output "Handling accept-line"
+
+	typeset -g prompt_pure_last_cmd_timestamp=$EPOCHSECONDS
+
+	# Re-render prompt, now with timestamp
+	typeset -g prompt_pure_show_timestamp=true
+	prompt_pure_preprompt_render
+	typeset -g prompt_pure_show_timestamp=
+
+	# Run original handler
+	zle && zle .accept-line
+	prompt_pure_debug_output "Ran accept-line widget: $?"
+}
+
 prompt_pure_preexec() {
+	prompt_pure_debug_output "Handling preexec"
+
 	if [[ -n $prompt_pure_git_fetch_pattern ]]; then
 		# detect when git is performing pull/fetch (including git aliases).
 		local -H MATCH MBEGIN MEND match mbegin mend
@@ -103,8 +120,6 @@ prompt_pure_preexec() {
 			async_flush_jobs 'prompt_pure'
 		fi
 	fi
-
-	typeset -g prompt_pure_cmd_timestamp=$EPOCHSECONDS
 
 	# shows the current dir and executed command in the title while a process is active
 	if [[ $2 != set-tab-title* ]]; then
@@ -131,6 +146,8 @@ prompt_pure_colour_for_exit_code() {
 prompt_pure_preprompt_render() {
 	setopt localoptions noshwordsplit
 
+	prompt_pure_debug_output "Rendering$([[ -n $1 ]] && echo ' for '$1)"
+
 	# Set color for git branch/dirty status, change color if dirty checking has
 	# been delayed.
 	local git_color=101 #242
@@ -154,11 +171,11 @@ prompt_pure_preprompt_render() {
 	# Add git branch and dirty status info.
 	typeset -gA prompt_pure_vcs_info
 	if [[ -n $prompt_pure_vcs_info[branch] ]]; then
-		preprompt_parts+=("%F{052}${prompt_pure_git_dirty}%F{$git_color}"$(print -- "\uF126")' ${prompt_pure_vcs_info[branch]}%f')
+		preprompt_parts+=("%F{088}${prompt_pure_git_dirty}%F{$git_color}"$(print -- "\uF126")' ${prompt_pure_vcs_info[branch]}%f')
 	fi
 	# Git pull/push arrows.
 	if [[ -n $prompt_pure_git_arrows ]]; then
-		preprompt_parts+=('%F{cyan}${prompt_pure_git_arrows}%f')
+		preprompt_parts+=('%F{104}${prompt_pure_git_arrows}%f')
 	fi
 	# Git tag info.
 	if [[ -n prompt_pure_git_tag_and_commit ]]; then
@@ -167,8 +184,14 @@ prompt_pure_preprompt_render() {
 
 	# Username and machine, if applicable.
 	[[ -n $prompt_pure_username ]] && preprompt_parts+=('$prompt_pure_username')
+
 	# Execution time.
-	[[ -n $prompt_pure_cmd_exec_time ]] && preprompt_r_parts+=('%F{yellow}${prompt_pure_cmd_exec_time}%f')
+	[[ -n $prompt_pure_cmd_exec_time ]] && preprompt_r_parts+=('%F{088}$(print -- \\uF252) ${prompt_pure_cmd_exec_time}%f')
+	# Timestamp.
+	if [[ $prompt_pure_show_timestamp == true ]]; then
+		local timestamp_str=$(command date --date="@$prompt_pure_last_cmd_timestamp" +' %a %H:%M:%S')
+		preprompt_r_parts+=(" %F{242}$(print -- \\uF017$timestamp_str)%f")
+	fi
 
 	local cleaned_ps1=$PROMPT
 	local -H MATCH MBEGIN MEND
@@ -195,26 +218,33 @@ prompt_pure_preprompt_render() {
 	if [[ -n $preprompt_r_parts ]]; then
 		preprompt_r_parts=("$RPROMPT_LINE_UP" "${preprompt_r_parts[@]}" "$RPROMPT_LINE_DOWN")
 		RPROMPT="${(j..)preprompt_r_parts}"
+	else
+		RPROMPT=''
 	fi
 
 	# Expand the prompt for future comparision.
 	local expanded_prompt
-	expanded_prompt="${(S%%)PROMPT}"
+	expanded_prompt="${(S%%)PROMPT}${(S%%)RPROMPT}"
 
 	if [[ $1 != precmd ]] && [[ $prompt_pure_last_prompt != $expanded_prompt ]]; then
-		# Redraw the prompt.
+		prompt_pure_debug_output "Redrawing prompt"
 		zle && zle .reset-prompt
+		prompt_pure_debug_output "Ran reset-prompt widget: $?"
 	fi
 
 	typeset -g prompt_pure_last_prompt=$expanded_prompt
+
+	prompt_pure_debug_output "Rendering complete"
 }
 
 prompt_pure_precmd() {
+	prompt_pure_debug_output "Handling precmd"
+
 	# check exec time and store it in a variable
 	prompt_pure_check_cmd_exec_time
-	unset prompt_pure_cmd_timestamp
+	unset prompt_pure_last_cmd_timestamp
 
-	prompt_pure_set_title 'restore'
+	prompt_pure_set_title "restore"
 
 	# preform async git dirty check and fetch
 	prompt_pure_async_tasks
@@ -288,57 +318,57 @@ prompt_pure_async_git_dirty() {
 }
 
 prompt_pure_debug_output() {
-	#echo -e "$(command date +"%Y-%m-%dT%H:%M:%S") $1" >>~/my_prompt.log
+	echo -e "$(command date +"%Y-%m-%dT%H:%M:%S") $1" >>~/my_prompt.log
 }
 
-prompt_pure_is_bluetooth_network_connection() {
-	services=$(networksetup -listnetworkserviceorder | grep 'Hardware Port')
-
-	while read line; do
-		sname=$(echo $line | awk -F  "(, )|(: )|[)]" '{print $2}')
-		sdev=$(echo $line | awk -F  "(, )|(: )|[)]" '{print $4}')
-		if [ -n "$sdev" ]; then
-			ifout="$(ifconfig $sdev 2>/dev/null)"
-			echo "$ifout" | grep 'status: active' > /dev/null 2>&1
-			rc="$?"
-			if [ "$rc" -eq 0 ]; then
-				currentservice="$sname"
-				currentdevice="$sdev"
-				currentmac=$(echo "$ifout" | awk '/ether/{print $2}')
-			fi
-		fi
-	done <<< "$(echo "$services")"
-
-	prompt_pure_debug_output "Current service is ${currentservice:-?}"
-	if [ -n "$currentservice" ]; then
-		if [[ $currentservice == *Bluetooth* ]]; then
-			return 0
-		fi
-	fi
-	return 1
-}
-
-prompt_pure_async_git_fetch() {
-	setopt localoptions noshwordsplit
-	# use cd -q to avoid side effects of changing directory, e.g. chpwd hooks
-	builtin cd -q $1
-
-	if prompt_pure_is_bluetooth_network_connection; then
-		prompt_pure_debug_output "Skipping fetch; on bluetooth"
-		return 1
-	fi
-	prompt_pure_debug_output "Allowing fetch; not on bluetooth"
-
-	# set GIT_TERMINAL_PROMPT=0 to disable auth prompting for git fetch (git 2.3+)
-	export GIT_TERMINAL_PROMPT=0
-	# set ssh BachMode to disable all interactive ssh password prompting
-	export GIT_SSH_COMMAND=${GIT_SSH_COMMAND:-"ssh -o BatchMode=yes"}
-
-	command git -c gc.auto=0 fetch &>/dev/null || return 99
-
-	# check arrow status after a successful git fetch
-	prompt_pure_async_git_arrows $1
-}
+#prompt_pure_is_bluetooth_network_connection() {
+#	services=$(networksetup -listnetworkserviceorder | grep 'Hardware Port')
+#
+#	while read line; do
+#		sname=$(echo $line | awk -F  "(, )|(: )|[)]" '{print $2}')
+#		sdev=$(echo $line | awk -F  "(, )|(: )|[)]" '{print $4}')
+#		if [ -n "$sdev" ]; then
+#			ifout="$(ifconfig $sdev 2>/dev/null)"
+#			echo "$ifout" | grep 'status: active' > /dev/null 2>&1
+#			rc="$?"
+#			if [ "$rc" -eq 0 ]; then
+#				currentservice="$sname"
+#				currentdevice="$sdev"
+#				currentmac=$(echo "$ifout" | awk '/ether/{print $2}')
+#			fi
+#		fi
+#	done <<< "$(echo "$services")"
+#
+#	prompt_pure_debug_output "Current service is ${currentservice:-?}"
+#	if [ -n "$currentservice" ]; then
+#		if [[ $currentservice == *Bluetooth* ]]; then
+#			return 0
+#		fi
+#	fi
+#	return 1
+#}
+#
+#prompt_pure_async_git_fetch() {
+#	setopt localoptions noshwordsplit
+#	# use cd -q to avoid side effects of changing directory, e.g. chpwd hooks
+#	builtin cd -q $1
+#
+#	if prompt_pure_is_bluetooth_network_connection; then
+#		prompt_pure_debug_output "Skipping fetch; on bluetooth"
+#		return 99
+#	fi
+#	prompt_pure_debug_output "Allowing fetch; not on bluetooth"
+#
+#	# set GIT_TERMINAL_PROMPT=0 to disable auth prompting for git fetch (git 2.3+)
+#	export GIT_TERMINAL_PROMPT=0
+#	# set ssh BachMode to disable all interactive ssh password prompting
+#	export GIT_SSH_COMMAND=${GIT_SSH_COMMAND:-"ssh -o BatchMode=yes"}
+#
+#	command git -c gc.auto=0 fetch &>/dev/null || return 99
+#
+#	# check arrow status after a successful git fetch
+#	prompt_pure_async_git_arrows $1
+#}
 
 prompt_pure_async_git_arrows() {
 	setopt localoptions noshwordsplit
@@ -404,21 +434,21 @@ prompt_pure_async_tasks() {
 prompt_pure_async_refresh() {
 	setopt localoptions noshwordsplit
 
-	if [[ -z $prompt_pure_git_fetch_pattern ]]; then
-		# we set the pattern here to avoid redoing the pattern check until the
-		# working three has changed. pull and fetch are always valid patterns.
-		typeset -g prompt_pure_git_fetch_pattern="pull|fetch"
-		async_job "prompt_pure" prompt_pure_async_git_aliases $working_tree
-	fi
+	#if [[ -z $prompt_pure_git_fetch_pattern ]]; then
+	#	# we set the pattern here to avoid redoing the pattern check until the
+	#	# working three has changed. pull and fetch are always valid patterns.
+	#	typeset -g prompt_pure_git_fetch_pattern="pull|fetch"
+	#	async_job "prompt_pure" prompt_pure_async_git_aliases $working_tree
+	#fi
 
 	async_job "prompt_pure" prompt_pure_async_git_arrows $PWD
 	async_job "prompt_pure" prompt_pure_async_git_tag_and_commit $PWD
 
-	# do not preform git fetch if it is disabled or working_tree == HOME
-	if (( ${PURE_GIT_PULL:-1} )) && [[ $working_tree != $HOME ]]; then
-		# tell worker to do a git fetch
-		async_job "prompt_pure" prompt_pure_async_git_fetch $PWD
-	fi
+	## do not preform git fetch if it is disabled or working_tree == HOME
+	#if (( ${PURE_GIT_PULL:-1} )) && [[ $working_tree != $HOME ]]; then
+	#	# tell worker to do a git fetch
+	#	async_job "prompt_pure" prompt_pure_async_git_fetch $PWD
+	#fi
 
 	# if dirty checking is sufficiently fast, tell worker to check it again, or wait for timeout
 	integer time_since_last_dirty_check=$(( EPOCHSECONDS - ${prompt_pure_git_last_dirty_check_timestamp:-0} ))
@@ -437,13 +467,14 @@ prompt_pure_print_all_colours() {
 
 prompt_pure_check_git_arrows() {
 	setopt localoptions noshwordsplit
-	local arrows left=${1:-0} right=${2:-0}
+	local -a arrows
+	local left=${1:-0} right=${2:-0}
 
-	(( right > 0 )) && arrows+=${PURE_GIT_DOWN_ARROW:-$(print -- "\uF01A")}
-	(( left > 0 )) && arrows+=${PURE_GIT_UP_ARROW:-$(print -- "\uF01B")}
+	(( right > 0 )) && arrows+=(${PURE_GIT_DOWN_ARROW:-$(print -- "\uF01A")})
+	(( left > 0 )) && arrows+=(${PURE_GIT_UP_ARROW:-$(print -- "\uF01B")})
 
 	[[ -n $arrows ]] || return
-	typeset -g REPLY=$arrows
+	typeset -g REPLY=${(j. .)arrows}
 }
 
 prompt_pure_async_callback() {
@@ -510,6 +541,7 @@ prompt_pure_async_callback() {
 				local REPLY
 				prompt_pure_check_git_arrows ${(ps:\t:)output}
 				if [[ $prompt_pure_git_arrows != $REPLY ]]; then
+					prompt_pure_debug_output "New git arrows: $REPLY"
 					typeset -g prompt_pure_git_arrows=$REPLY
 					do_render=1
 				fi
@@ -517,6 +549,7 @@ prompt_pure_async_callback() {
 				# Unless the exit code is 99, prompt_pure_async_git_arrows
 				# failed with a non-zero exit status, meaning there is no
 				# upstream configured.
+				prompt_pure_debug_output "Git arrows failed with $code"
 				if [[ -n $prompt_pure_git_arrows ]]; then
 					unset prompt_pure_git_arrows
 					do_render=1
@@ -538,7 +571,7 @@ prompt_pure_async_callback() {
 		return
 	fi
 
-	[[ ${prompt_pure_async_render_requested:-$do_render} = 1 ]] && prompt_pure_preprompt_render
+	[[ ${prompt_pure_async_render_requested:-$do_render} = 1 ]] && prompt_pure_preprompt_render "async"
 	unset prompt_pure_async_render_requested
 }
 
@@ -575,6 +608,9 @@ prompt_pure_setup() {
 	[[ $UID -eq 0 ]] && prompt_pure_username='%F{white}%n%f%F{242}@%m%f'
 
 	PROMPT='$(prompt_pure_colour_for_exit_code)'$PROMPT_PREFIX_BOTTOM'%f '
+
+	# Override enter behaviour so that we can modify the existing prompt before each command is run
+	zle -N accept-line prompt_pure_accept_line
 }
 
 prompt_pure_setup "$@"
