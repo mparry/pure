@@ -72,21 +72,19 @@ prompt_pure_set_title() {
 
 	if [[ $1 != "restore" ]]; then
 		prompt_pure_debug_output "Setting terminal title to: $2"
-		# Store current title
-		print -n '\033[22;0t'
-		# tell the terminal we are setting the title
-		print -n '\e]0;'
+
 		# show hostname if connected through ssh
-		[[ -n $SSH_CONNECTION ]] && print -Pn '(%m) '
+		local hostname=
+		[[ -n $SSH_CONNECTION ]] && hostname="${(%):-(%m) }"
+
+		local -a opts
 		case $1 in
-			expand-prompt)
-				print -Pn $2;;
-			ignore-escape)
-				print -rn $2;;
-			restore)
+			expand-prompt) opts=(-P);;
+			ignore-escape) opts=(-r);;
 		esac
-		# end set title
-		print -n '\a'
+
+		# Store current title; tell the terminal we are setting the title; maybe hostname; actual title; end
+		print -n $opts $'\033[22;0t'$'\e]0;'${hostname}${2}$'\a'
 	else
 		prompt_pure_debug_output "Restoring previous terminal title"
 		print -n '\033[23;0t'
