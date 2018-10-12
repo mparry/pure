@@ -233,7 +233,7 @@ prompt_pure_precmd() {
 
 	# check exec time and store it in a variable
 	elapsed=$(prompt_pure_check_cmd_exec_time)
-	[[ -n $elapsed ]] && print -P -- "%F{088}\\uF252 $elapsed%f"
+	[[ -n $elapsed ]] && print -P -- "%F{142}\\uF252 $elapsed%f"
 
 	prompt_pure_create_async_tasks
 
