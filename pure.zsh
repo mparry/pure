@@ -28,6 +28,7 @@ PROMPT_PREFIX_BOTTOM='╰─'
 RPROMPT_LINE_UP='%{'$'\e[1A''%}' # one line up
 RPROMPT_LINE_DOWN='%{'$'\e[1B''%}' # one line down
 
+export PROMPT_SHOW_KUBE=0
 export VIRTUAL_ENV_DISABLE_PROMPT=1
 
 # turns seconds into human readable time
@@ -156,6 +157,17 @@ prompt_pure_preprompt_render() {
 	if [[ ! -z "$_conda" && $CONDA_PREFIX =~ .+/envs/.+ ]]; then
 		preprompt_parts+=('%F{242}'$(print -- "\UE73C ")$(basename $_conda)'%f')
 	fi
+
+	if [[ $PROMPT_SHOW_KUBE -ne 0 ]]; then
+		local kube_info=$(kubectl config current-context 2>/dev/null)
+		if [[ ! -z $kube_info ]]; then
+	        local kube_namespace=$(kubectl config view --minify --output 'jsonpath={..namespace}' 2>/dev/null)
+			if [[ ! -z $kube_namespace ]]; then
+				kube_info="${kube_info}:${kube_namespace}"
+			fi
+			preprompt_parts+=('%F{242}'$(print -- "\UE764 ${kube_info}")'%f')
+		fi
+    fi
 
 	if [[ $1 != precmd ]]; then
 		# Add git branch and dirty status info.
