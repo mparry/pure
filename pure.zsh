@@ -23,8 +23,8 @@
 # \e[K  => clears everything after the cursor on the current line
 # \e[2K => clear everything on the current line
 
-PROMPT_PREFIX_TOP='╭─'
-PROMPT_PREFIX_BOTTOM='╰─'
+PROMPT_PREFIX_TOP='╭' #'╭─'
+PROMPT_PREFIX_BOTTOM='╰' #'╰─'
 RPROMPT_LINE_UP='%{'$'\e[1A''%}' # one line up
 RPROMPT_LINE_DOWN='%{'$'\e[1B''%}' # one line down
 
