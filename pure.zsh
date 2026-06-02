@@ -158,7 +158,8 @@ prompt_pure_preprompt_render() {
 		preprompt_parts+=('%F{242}'$(print -- "\UE73C ")$(basename $_conda)'%f')
 	fi
 
-	if [[ $PROMPT_SHOW_KUBE -ne 0 ]]; then
+	#if [[ $PROMPT_SHOW_KUBE -ne 0 ]]; then
+	if command -v aws >/dev/null 2>&1 ; then
 		local kube_info=$(kubectl config current-context 2>/dev/null)
 		if [[ ! -z $kube_info ]]; then
 	        local kube_namespace=$(kubectl config view --minify --output 'jsonpath={..namespace}' 2>/dev/null)
