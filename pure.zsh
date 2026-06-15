@@ -211,91 +211,70 @@ prompt_pure_render_dimmed_path() {
 prompt_pure_preprompt_render() {
 	setopt localoptions noshwordsplit
 
-	# Colour for git branch/dirty status; switches when the dirty check is cached.
-	local git_color=101
-	[[ -n ${prompt_pure_git_last_dirty_check_timestamp+x} ]] && git_color=red
+	unset prompt_pure_async_render_requested
 
-	local -a preprompt_parts
-	local -a preprompt_r_parts
+	# Branch/dirty colour: red once the dirty-check result is cached.
+	typeset -g prompt_pure_git_branch_color=101
+	[[ -n ${prompt_pure_git_last_dirty_check_timestamp+x} ]] && prompt_pure_git_branch_color=red
 
-	# Top corner, coloured by the previous command's exit code.
-	preprompt_parts+=('$(prompt_pure_colour_for_exit_code)'$PROMPT_PREFIX_TOP)
-
-	# Current path.
-	preprompt_parts+=('%F{12}%~%f')
+	# Populate the psvar slots used by the static PROMPT template (built once in
+	# prompt_pure_setup). Each is rendered with %(NV.true.false), so an empty
+	# slot simply vanishes. Using a static PROMPT + psvar — rather than
+	# rebuilding the whole PROMPT string every render — keeps `zle reset-prompt`
+	# repainting a fixed structure, which is what prevents the cd-time redraw
+	# corruption.
+	#   psvar[14]=branch  [15]=dirty  [16]=arrows  [17]=tag/commit
+	#   psvar[18]=conda   [19]=kube
+	psvar[14]=${prompt_pure_vcs_info[branch]}
+	psvar[15]=${prompt_pure_git_dirty}
+	psvar[16]=${prompt_pure_git_arrows}
+	psvar[17]=${prompt_pure_git_tag_and_commit}
 
 	# Conda environment (only inside a named env under .../envs/...).
+	psvar[18]=
 	local _conda=$CONDA_ENV_PATH$CONDA_PREFIX
 	if [[ -n $_conda && $CONDA_PREFIX =~ .+/envs/.+ ]]; then
-		preprompt_parts+=('%F{242}'$'\UE73C'" ${_conda:t}"'%f')
+		psvar[18]=$'\UE73C'" ${_conda:t}"
 	fi
 
 	# Kubernetes context. Gated on the aws CLI being present, as a cheap proxy
 	# for "this is a work machine where kube context is relevant".
+	psvar[19]=
 	if (( $+commands[aws] )); then
 		local kube_info=$(command kubectl config current-context 2>/dev/null)
 		if [[ -n $kube_info ]]; then
 			local kube_namespace=$(command kubectl config view --minify --output 'jsonpath={..namespace}' 2>/dev/null)
 			[[ -n $kube_namespace ]] && kube_info="${kube_info}:${kube_namespace}"
-			preprompt_parts+=('%F{242}'$'\U000F10FE'" ${kube_info}"'%f')
+			psvar[19]=$'\U000F10FE'" ${kube_info}"
 		fi
 	fi
 
-	if [[ $1 != precmd ]]; then
-		# Git branch and dirty status.
-		if [[ -n $prompt_pure_vcs_info[branch] ]]; then
-			preprompt_parts+=("%F{$git_color}"$''' ${prompt_pure_vcs_info[branch]}%F{088}${prompt_pure_git_dirty}%f')
-		fi
-		# Git push/pull arrows.
-		[[ -n $prompt_pure_git_arrows ]] && preprompt_parts+=('%F{104}${prompt_pure_git_arrows}%f')
-		# Git tag and commit.
-		[[ -n $prompt_pure_git_tag_and_commit ]] && preprompt_parts+=("%F{$git_color}"'${prompt_pure_git_tag_and_commit}%f')
-	fi
-
-	# username@host (set in prompt_pure_setup for SSH / root).
-	[[ -n $prompt_pure_username ]] && preprompt_parts+=('$prompt_pure_username')
-
-	# Right-aligned timestamp of the command being run (set via accept-line).
+	# Right-aligned timestamp of the command being run (set via accept-line),
+	# floated onto the preprompt line with a cursor-up RPROMPT.
 	if [[ $prompt_pure_show_timestamp == true ]]; then
 		local timestamp_str=$(command date --date="@${prompt_pure_last_cmd_timestamp%.*}" +' %a %H:%M:%S')
-		preprompt_r_parts+=(" %F{242}"$''"${timestamp_str}%f")
-	fi
-
-	# Rebuild PROMPT: keep only the command line (everything outside our
-	# preprompt newlines) so prefixers like virtualenv survive, then prepend the
-	# freshly-built preprompt.
-	local cleaned_ps1=$PROMPT
-	local -H MATCH MBEGIN MEND
-	if [[ $PROMPT = *$prompt_newline* ]]; then
-		cleaned_ps1=${PROMPT%%${prompt_newline}*}${PROMPT##*${prompt_newline}}
-	fi
-	unset MATCH MBEGIN MEND
-
-	local -ah ps1
-	ps1=(
-		$prompt_newline           # Initial newline, for spaciousness.
-		${(j. .)preprompt_parts}  # Join parts, space separated.
-		$prompt_newline           # Separate preprompt and prompt.
-		$cleaned_ps1
-	)
-	PROMPT="${(j..)ps1}"
-
-	# Float the timestamp onto the preprompt line via a cursor-up RPROMPT.
-	if [[ -n $preprompt_r_parts ]]; then
-		preprompt_r_parts=("$RPROMPT_LINE_UP" "${preprompt_r_parts[@]}" "$RPROMPT_LINE_DOWN")
-		RPROMPT="${(j..)preprompt_r_parts}"
+		RPROMPT="${RPROMPT_LINE_UP} %F{242}"$''"${timestamp_str}%f${RPROMPT_LINE_DOWN}"
 	else
 		RPROMPT=''
 	fi
 
-	# Expand the prompt to detect changes for the next render.
-	local expanded_prompt="${(S%%)PROMPT}${(S%%)RPROMPT}"
+	# Detect changes in the dynamic parts without expanding PROMPT (no subshell).
+	local -a fingerprint_parts=(
+		"${psvar[14]}" "${psvar[15]}" "${psvar[16]}" "${psvar[17]}"
+		"${psvar[18]}" "${psvar[19]}" "${prompt_pure_git_branch_color}"
+		"${RPROMPT}" "${PWD}"
+	)
+	local fingerprint="${(pj:|:)${(@qqq)fingerprint_parts}}"
 
-	if [[ $1 != precmd ]] && [[ $prompt_pure_last_prompt != $expanded_prompt ]]; then
+	if [[ $1 == precmd ]]; then
+		# Initial blank line for spaciousness — printed, not baked into PROMPT
+		# (a leading newline in PROMPT reintroduces the reset-prompt corruption).
+		print
+	elif [[ $prompt_pure_last_prompt != $fingerprint ]]; then
 		prompt_pure_reset_prompt
 	fi
 
-	typeset -g prompt_pure_last_prompt=$expanded_prompt
+	typeset -g prompt_pure_last_prompt=$fingerprint
 }
 
 prompt_pure_precmd() {
@@ -1207,11 +1186,21 @@ prompt_pure_setup() {
 	typeset -gA prompt_pure_vcs_info
 	typeset -g prompt_pure_git_branch_color=$prompt_pure_colors[git:branch]
 
-	# A two-line, box-drawing prompt. The preprompt (top line: path, git, etc.)
-	# is assembled dynamically in prompt_pure_preprompt_render; here we set only
-	# the command line itself — the bottom corner, coloured by the previous
-	# command's exit code. RPROMPT (the timestamp) is managed per-render too.
-	PROMPT='$(prompt_pure_colour_for_exit_code)'$PROMPT_PREFIX_BOTTOM'%f '
+	# A two-line, box-drawing prompt built ONCE as a static template. Every
+	# dynamic segment is a psvar slot rendered with %(NV.true.false), so empty
+	# slots vanish and `zle reset-prompt` always repaints a fixed structure —
+	# which is what makes the redraw safe. The renderer only sets psvar values.
+	#   psvar 14=branch 15=dirty 16=arrows 17=tag/commit 18=conda 19=kube
+	PROMPT='$(prompt_pure_colour_for_exit_code)'$PROMPT_PREFIX_TOP        # top corner (exit-code colour)
+	PROMPT+=' %F{12}%~%f'                                                 # path
+	PROMPT+='%(18V. %F{242}%18v%f.)'                                      # conda
+	PROMPT+='%(19V. %F{242}%19v%f.)'                                      # kube
+	PROMPT+='%(14V. %F{${prompt_pure_git_branch_color}}'$''' %14v%(15V.%F{088}%15v.)%f.)'  # branch + dirty
+	PROMPT+='%(16V. %F{104}%16v%f.)'                                      # git arrows
+	PROMPT+='%(17V. %F{${prompt_pure_git_branch_color}}%17v%f.)'          # git tag + commit
+	PROMPT+='${prompt_pure_username}'                                     # user@host (SSH / root)
+	PROMPT+=$prompt_newline                                              # newline → command line
+	PROMPT+='$(prompt_pure_colour_for_exit_code)'$PROMPT_PREFIX_BOTTOM'%f '  # bottom corner + space
 
 	# Continuation prompt.
 	PROMPT2='%F{242}… %(1_.%_ .%_)%f $(prompt_pure_colour_for_exit_code)'$PROMPT_PREFIX_BOTTOM'%f '
@@ -1260,8 +1249,8 @@ prompt_pure_setup() {
 
 	# Show username@host when on SSH; root in white.
 	typeset -g prompt_pure_username=
-	[[ -n $SSH_CONNECTION ]] && prompt_pure_username='%F{242}%n@%m%f'
-	[[ $UID -eq 0 ]] && prompt_pure_username='%F{white}%n%f%F{242}@%m%f'
+	[[ -n $SSH_CONNECTION ]] && prompt_pure_username=' %F{242}%n@%m%f'
+	[[ $UID -eq 0 ]] && prompt_pure_username=' %F{white}%n%f%F{242}@%m%f'
 
 	# Custom git arrow glyphs (consumed by prompt_pure_check_git_arrows).
 	: ${PURE_GIT_DOWN_ARROW=$''}
