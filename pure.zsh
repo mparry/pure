@@ -23,6 +23,49 @@
 # \e[K  => clears everything after the cursor on the current line
 # \e[2K => clear everything on the current line
 
+# A box-drawing, two-line prompt with custom segments (conda, kube, git
+# tag/commit), a command-execution-time line, and a right-aligned timestamp.
+# Grafted onto pure v1.28.1's async core.
+PROMPT_PREFIX_TOP='╭'
+PROMPT_PREFIX_BOTTOM='╰'
+RPROMPT_LINE_UP='%{'$'\e[1A''%}'    # move the cursor one line up
+RPROMPT_LINE_DOWN='%{'$'\e[1B''%}'  # move the cursor one line down
+
+# Colour the prompt corners white on success and red on failure. 141 (SIGPIPE,
+# e.g. from `git log`) is treated as success.
+prompt_pure_colour_for_exit_code() {
+	print -n '%(141?.%F{white}.%(?.%F{white}.%F{red}))'
+}
+
+# Human-readable elapsed time; sub-second resolution below a minute.
+prompt_pure_fmt_exec_time() {
+	local human total_seconds=$1
+	if (( total_seconds > 60 )); then
+		local days=$(( total_seconds / 60 / 60 / 24 ))
+		local hours=$(( total_seconds / 60 / 60 % 24 ))
+		local minutes=$(( total_seconds / 60 % 60 ))
+		local seconds=$(( total_seconds % 60 ))
+		(( days > 0 )) && human+="${days}d "
+		(( hours > 0 )) && human+="${hours}h "
+		(( minutes > 0 )) && human+="${minutes}m "
+		human+="${seconds}s"
+	else
+		typeset -F 1 total_seconds
+		human="${total_seconds}s"
+	fi
+	print -- "$human"
+}
+
+# Re-render with a timestamp on the line being executed, then run the command.
+prompt_pure_accept_line() {
+	typeset -g prompt_pure_last_cmd_timestamp=$EPOCHREALTIME
+
+	typeset -g prompt_pure_show_timestamp=true
+	prompt_pure_preprompt_render
+	typeset -g prompt_pure_show_timestamp=
+
+	zle .accept-line
+}
 
 # Turns seconds into human readable time.
 # 165392 => 1d 21h 56m 32s
@@ -67,6 +110,14 @@ prompt_pure_set_title() {
 		/dev/ttyS[0-9]*) return;;
 	esac
 
+	# "restore" pops the title the terminal saved when we last set it, so our
+	# title only persists while a command runs and the title is otherwise left
+	# untouched.
+	if [[ $1 == restore ]]; then
+		print -n $'\e[23;0t'
+		return
+	fi
+
 	# Show hostname if connected via SSH and host display is enabled.
 	local hostname=
 	if (( psvar[13] )) && (( ${prompt_pure_state[show_host]:-1} )); then
@@ -80,8 +131,10 @@ prompt_pure_set_title() {
 		ignore-escape) opts=(-r);;
 	esac
 
-	# Set title atomically in one print statement so that it works when XTRACE is enabled.
-	print -n $opts $'\e]0;'${hostname}${2}$'\a'
+	# Save the current title, then set ours atomically in one print statement so
+	# that it works when XTRACE is enabled. The escapes use $'...' so they remain
+	# real control bytes even under `print -r` (the 'ignore-escape' path).
+	print -n $opts $'\e[22;0t\e]0;'${hostname}${2}$'\a'
 }
 
 prompt_pure_preexec() {
@@ -97,8 +150,11 @@ prompt_pure_preexec() {
 
 	typeset -g prompt_pure_cmd_timestamp=$EPOCHSECONDS
 
-	# Shows the current directory and executed command in the title while a process is active.
-	prompt_pure_set_title 'ignore-escape' "$PWD:t: $2"
+	# Show the executed command in the title while a process is active; skip the
+	# helper used to set tab titles so we don't clobber it.
+	if [[ $2 != set-tab-title* ]]; then
+		prompt_pure_set_title 'ignore-escape' "$2"
+	fi
 
 	# Disallow Python virtualenv from updating the prompt. Set it to 20 if
 	# untouched by the user to indicate that Pure modified it. Here we use
@@ -155,97 +211,107 @@ prompt_pure_render_dimmed_path() {
 prompt_pure_preprompt_render() {
 	setopt localoptions noshwordsplit
 
-	unset prompt_pure_async_render_requested
+	# Colour for git branch/dirty status; switches when the dirty check is cached.
+	local git_color=101
+	[[ -n ${prompt_pure_git_last_dirty_check_timestamp+x} ]] && git_color=red
 
-	# Update git branch color based on cache state.
-	typeset -g prompt_pure_git_branch_color=$prompt_pure_colors[git:branch]
-	[[ -n ${prompt_pure_git_last_dirty_check_timestamp+x} ]] && prompt_pure_git_branch_color=$prompt_pure_colors[git:branch:cached]
+	local -a preprompt_parts
+	local -a preprompt_r_parts
 
-	# Update psvar values. PROMPT uses %(NV.true.false) to conditionally
-	# render each part. See prompt_pure_setup for the PROMPT template.
-	#
-	# psvar[12]: Suspended jobs symbol.
-	psvar[12]=
-	((${(M)#jobstates:#suspended:*} != 0)) && psvar[12]=${PURE_SUSPENDED_JOBS_SYMBOL-✦}
+	# Top corner, coloured by the previous command's exit code.
+	preprompt_parts+=('$(prompt_pure_colour_for_exit_code)'$PROMPT_PREFIX_TOP)
 
-	# psvar[13]: Username flag (set once in prompt_pure_state_setup).
+	# Current path.
+	preprompt_parts+=('%F{12}%~%f')
 
-	# psvar[14]: Git branch name.
-	psvar[14]=${prompt_pure_vcs_info[branch]}
-
-	# psvar[15]: Git dirty marker.
-	psvar[15]=${prompt_pure_git_dirty}
-
-	# psvar[16]: Git action (rebase/merge).
-	psvar[16]=${prompt_pure_vcs_info[action]}
-
-	# psvar[17]: Git arrows (push/pull).
-	psvar[17]=${prompt_pure_git_arrows}
-
-	# psvar[18]: Git stash symbol.
-	psvar[18]=
-	[[ -n $prompt_pure_git_stash ]] && psvar[18]=${PURE_GIT_STASH_SYMBOL-≡}
-
-	# psvar[19]: Command execution time.
-	psvar[19]=${prompt_pure_cmd_exec_time}
-
-	# psvar[21]: Node.js version.
-	psvar[21]=
-	if [[ -n $prompt_pure_node_version ]]; then
-		local node_symbol
-		zstyle -s ":prompt:pure:environment:node_version" symbol node_symbol || node_symbol='⬢'
-		psvar[21]="${node_symbol}${prompt_pure_node_version}"
+	# Conda environment (only inside a named env under .../envs/...).
+	local _conda=$CONDA_ENV_PATH$CONDA_PREFIX
+	if [[ -n $_conda && $CONDA_PREFIX =~ .+/envs/.+ ]]; then
+		preprompt_parts+=('%F{242}'$'\UE73C'" ${_conda:t}"'%f')
 	fi
 
-	# psvar[22]: Custom prefix, psvar[23]: Custom suffix.
-	# Set by the user-defined prompt_pure_precustom function.
-	psvar[22]=
-	psvar[23]=
-	if (( $+functions[prompt_pure_precustom] )); then
-		prompt_pure_precustom
+	# Kubernetes context. Gated on the aws CLI being present, as a cheap proxy
+	# for "this is a work machine where kube context is relevant".
+	if (( $+commands[aws] )); then
+		local kube_info=$(command kubectl config current-context 2>/dev/null)
+		if [[ -n $kube_info ]]; then
+			local kube_namespace=$(command kubectl config view --minify --output 'jsonpath={..namespace}' 2>/dev/null)
+			[[ -n $kube_namespace ]] && kube_info="${kube_info}:${kube_namespace}"
+			preprompt_parts+=('%F{242}'$'\U000F10FE'" ${kube_info}"'%f')
+		fi
 	fi
 
-	# Build a fingerprint from all dynamic prompt components to detect changes
-	# without expanding PROMPT (which forks a subshell when dimmed path is on).
-	local -a prompt_fingerprint_parts=(
-		"${psvar[12]}"
-		"${psvar[13]}"
-		"${psvar[14]}"
-		"${psvar[15]}"
-		"${psvar[16]}"
-		"${psvar[17]}"
-		"${psvar[18]}"
-		"${psvar[19]}"
-		"${psvar[20]}"
-		"${psvar[21]}"
-		"${psvar[22]}"
-		"${psvar[23]}"
-		"${prompt_pure_state[prompt]}"
-		"${prompt_pure_git_branch_color}"
-		"${PWD}"
+	if [[ $1 != precmd ]]; then
+		# Git branch and dirty status.
+		if [[ -n $prompt_pure_vcs_info[branch] ]]; then
+			preprompt_parts+=("%F{$git_color}"$''' ${prompt_pure_vcs_info[branch]}%F{088}${prompt_pure_git_dirty}%f')
+		fi
+		# Git push/pull arrows.
+		[[ -n $prompt_pure_git_arrows ]] && preprompt_parts+=('%F{104}${prompt_pure_git_arrows}%f')
+		# Git tag and commit.
+		[[ -n $prompt_pure_git_tag_and_commit ]] && preprompt_parts+=("%F{$git_color}"'${prompt_pure_git_tag_and_commit}%f')
+	fi
+
+	# username@host (set in prompt_pure_setup for SSH / root).
+	[[ -n $prompt_pure_username ]] && preprompt_parts+=('$prompt_pure_username')
+
+	# Right-aligned timestamp of the command being run (set via accept-line).
+	if [[ $prompt_pure_show_timestamp == true ]]; then
+		local timestamp_str=$(command date --date="@${prompt_pure_last_cmd_timestamp%.*}" +' %a %H:%M:%S')
+		preprompt_r_parts+=(" %F{242}"$''"${timestamp_str}%f")
+	fi
+
+	# Rebuild PROMPT: keep only the command line (everything outside our
+	# preprompt newlines) so prefixers like virtualenv survive, then prepend the
+	# freshly-built preprompt.
+	local cleaned_ps1=$PROMPT
+	local -H MATCH MBEGIN MEND
+	if [[ $PROMPT = *$prompt_newline* ]]; then
+		cleaned_ps1=${PROMPT%%${prompt_newline}*}${PROMPT##*${prompt_newline}}
+	fi
+	unset MATCH MBEGIN MEND
+
+	local -ah ps1
+	ps1=(
+		$prompt_newline           # Initial newline, for spaciousness.
+		${(j. .)preprompt_parts}  # Join parts, space separated.
+		$prompt_newline           # Separate preprompt and prompt.
+		$cleaned_ps1
 	)
-	local prompt_fingerprint="${(pj:|:)${(@qqq)prompt_fingerprint_parts}}"
+	PROMPT="${(j..)ps1}"
 
-	if [[ $1 == precmd ]]; then
-		# Initial newline, for spaciousness.
-		print
-	elif [[ $prompt_pure_last_prompt != $prompt_fingerprint ]]; then
-		# Redraw the prompt.
+	# Float the timestamp onto the preprompt line via a cursor-up RPROMPT.
+	if [[ -n $preprompt_r_parts ]]; then
+		preprompt_r_parts=("$RPROMPT_LINE_UP" "${preprompt_r_parts[@]}" "$RPROMPT_LINE_DOWN")
+		RPROMPT="${(j..)preprompt_r_parts}"
+	else
+		RPROMPT=''
+	fi
+
+	# Expand the prompt to detect changes for the next render.
+	local expanded_prompt="${(S%%)PROMPT}${(S%%)RPROMPT}"
+
+	if [[ $1 != precmd ]] && [[ $prompt_pure_last_prompt != $expanded_prompt ]]; then
 		prompt_pure_reset_prompt
 	fi
 
-	typeset -g prompt_pure_last_prompt=$prompt_fingerprint
+	typeset -g prompt_pure_last_prompt=$expanded_prompt
 }
 
 prompt_pure_precmd() {
 	setopt localoptions noshwordsplit
 
-	# Check execution time and store it in a variable.
-	prompt_pure_check_cmd_exec_time
-	unset prompt_pure_cmd_timestamp
+	# Print the previous command's execution time on its own line if it exceeds
+	# the threshold.
+	if [[ -n $prompt_pure_last_cmd_timestamp ]]; then
+		integer elapsed=$(( EPOCHREALTIME - prompt_pure_last_cmd_timestamp ))
+		(( elapsed > ${PURE_CMD_MAX_EXEC_TIME:-2} )) && \
+			print -P -- "%F{142}"$''" $(prompt_pure_fmt_exec_time $elapsed)%f"
+		unset prompt_pure_last_cmd_timestamp
+	fi
 
-	# Shows the full path in the title.
-	prompt_pure_set_title 'expand-prompt' '%~'
+	# Restore the terminal title we saved before the command ran.
+	prompt_pure_set_title 'restore'
 
 	# Modify the colors if some have changed..
 	prompt_pure_set_colors
@@ -253,36 +319,7 @@ prompt_pure_precmd() {
 	# Perform async Git dirty check and fetch.
 	prompt_pure_async_tasks
 
-	# Check if we should display the virtual env (psvar[20]).
-	psvar[20]=
-	if zstyle -T ":prompt:pure:environment:virtualenv" show; then
-		# Check if a Conda environment is active and display its name.
-		# The 'base' environment is always active and not informative.
-		if [[ -n $CONDA_DEFAULT_ENV ]] && [[ ${CONDA_DEFAULT_ENV:t} != base ]]; then
-			psvar[20]="${${CONDA_DEFAULT_ENV:t}//[$'\t\r\n']}"
-		fi
-		# When VIRTUAL_ENV_DISABLE_PROMPT is empty, it was unset by the user and
-		# Pure should take back control.
-		if [[ -n $VIRTUAL_ENV ]] && [[ -z $VIRTUAL_ENV_DISABLE_PROMPT || $VIRTUAL_ENV_DISABLE_PROMPT = 20 ]]; then
-			if [[ -n $VIRTUAL_ENV_PROMPT ]]; then
-				psvar[20]="${VIRTUAL_ENV_PROMPT}"
-			else
-				psvar[20]="${VIRTUAL_ENV:t}"
-			fi
-			export VIRTUAL_ENV_DISABLE_PROMPT=20
-		fi
-	fi
-
-	# Nix package manager integration. If used from within 'nix shell' - shell name is shown like so:
-	# ~/Projects/flake-utils-plus master
-	# flake-utils-plus ❯
-	if zstyle -T ":prompt:pure:environment:nix-shell" show; then
-		if [[ -n $IN_NIX_SHELL ]]; then
-			psvar[20]="${name:-nix-shell}"
-		fi
-	fi
-
-	# Make sure VIM prompt is reset.
+	# Make sure the VIM prompt symbol is reset.
 	prompt_pure_reset_prompt_symbol
 
 	# Print the preprompt.
@@ -466,6 +503,16 @@ prompt_pure_async_git_arrows() {
 	command git rev-list --left-right --count HEAD...@'{u}'
 }
 
+# Show an exact tag (when HEAD is tagged) followed by the short commit hash.
+prompt_pure_async_git_tag_and_commit() {
+	setopt localoptions noshwordsplit
+	local tag commit
+	tag=$(command git describe --tags --exact-match HEAD 2>/dev/null)
+	[[ -n $tag ]] && tag=$''" ${tag} "
+	commit=$(command git rev-parse --short=8 HEAD 2>/dev/null) || return $?
+	print -- "${tag}"$''" $commit"
+}
+
 prompt_pure_async_git_stash() {
 	command git rev-list --walk-reflogs --count refs/stash
 }
@@ -531,7 +578,7 @@ prompt_pure_async_worker_sync() {
 }
 
 prompt_pure_clear_git_state() {
-	unset prompt_pure_git_dirty prompt_pure_git_last_dirty_check_timestamp prompt_pure_git_arrows prompt_pure_git_stash prompt_pure_git_fetch_pattern
+	unset prompt_pure_git_dirty prompt_pure_git_last_dirty_check_timestamp prompt_pure_git_arrows prompt_pure_git_stash prompt_pure_git_fetch_pattern prompt_pure_git_tag_and_commit
 	typeset -gA prompt_pure_worker_env=()
 	typeset -gA prompt_pure_worker_env_pending=()
 	typeset -gA prompt_pure_vcs_info
@@ -659,8 +706,13 @@ prompt_pure_async_refresh() {
 
 	async_job "prompt_pure" prompt_pure_async_git_arrows || return
 
-	# Do not perform `git fetch` if it is disabled or in home folder.
-	if (( ${PURE_GIT_PULL:-1} )) && [[ $prompt_pure_vcs_info[top] != $HOME ]]; then
+	async_job "prompt_pure" prompt_pure_async_git_tag_and_commit || return
+
+	# Background `git fetch` is disabled by DEFAULT here (upstream defaults it
+	# on). It triggered a prompt-redraw bug when cd-ing into some repos, and the
+	# accuracy cost is minimal — only the "behind remote" arrow goes stale; the
+	# "unpushed" arrow stays correct. Re-enable with `export PURE_GIT_PULL=1`.
+	if (( ${PURE_GIT_PULL:-0} )) && [[ $prompt_pure_vcs_info[top] != $HOME ]]; then
 		zstyle -t :prompt:pure:git:fetch only_upstream
 		local only_upstream=$((? == 0))
 		async_job "prompt_pure" prompt_pure_async_git_fetch $only_upstream || return
@@ -687,13 +739,16 @@ prompt_pure_async_refresh() {
 
 prompt_pure_check_git_arrows() {
 	setopt localoptions noshwordsplit
-	local arrows left=${1:-0} right=${2:-0}
+	local -a arrows
+	local left=${1:-0} right=${2:-0}
 
-	(( right > 0 )) && arrows+=${PURE_GIT_DOWN_ARROW:-⇣}
-	(( left > 0 )) && arrows+=${PURE_GIT_UP_ARROW:-⇡}
+	(( right > 0 )) && arrows+=(${PURE_GIT_DOWN_ARROW:-⇣})
+	(( left > 0 )) && arrows+=(${PURE_GIT_UP_ARROW:-⇡})
 
 	[[ -n $arrows ]] || return
-	typeset -g REPLY=$arrows
+	# Join with a space so the two glyphs don't overlap when the branch is both
+	# ahead and behind.
+	typeset -g REPLY="${(j. .)arrows}"
 }
 
 prompt_pure_async_callback() {
@@ -707,7 +762,7 @@ prompt_pure_async_callback() {
 	fi
 
 	case $job in
-		prompt_pure_async_vcs_info|prompt_pure_async_git_aliases|prompt_pure_async_git_dirty|prompt_pure_async_git_fetch|prompt_pure_async_git_arrows|prompt_pure_async_git_stash)
+		prompt_pure_async_vcs_info|prompt_pure_async_git_aliases|prompt_pure_async_git_dirty|prompt_pure_async_git_fetch|prompt_pure_async_git_arrows|prompt_pure_async_git_stash|prompt_pure_async_git_tag_and_commit)
 			[[ ${prompt_pure_worker_env[pwd]-} == $PWD ]] || return
 			;;
 	esac
@@ -861,6 +916,15 @@ prompt_pure_async_callback() {
 			local prev_stash=$prompt_pure_git_stash
 			typeset -g prompt_pure_git_stash=$output
 			[[ $prev_stash != $prompt_pure_git_stash ]] && do_render=1
+			;;
+		prompt_pure_async_git_tag_and_commit)
+			local prev_tag=${prompt_pure_git_tag_and_commit-}
+			if (( code == 0 )); then
+				typeset -g prompt_pure_git_tag_and_commit=$output
+			else
+				unset prompt_pure_git_tag_and_commit
+			fi
+			[[ $prev_tag != ${prompt_pure_git_tag_and_commit-} ]] && do_render=1
 			;;
 	esac
 
@@ -1143,59 +1207,14 @@ prompt_pure_setup() {
 	typeset -gA prompt_pure_vcs_info
 	typeset -g prompt_pure_git_branch_color=$prompt_pure_colors[git:branch]
 
-	# Construct PROMPT once, both preprompt and prompt line. Kept
-	# dynamic via variables and psvar[12-21], updated each render
-	# in prompt_pure_preprompt_render. Numbering starts at 12 for
-	# legacy reasons (Pure originally used psvar[12] for virtualenv)
-	# and to avoid collisions with low psvar indices which users
-	# may rely on (e.g. %v expands psvar[1]).
-	#
-	#   psvar[12] = suspended jobs symbol (e.g. ✦)
-	#   psvar[13] = username flag, renders user/host (e.g. user@host)
-	#   psvar[14] = git branch
-	#   psvar[15] = git dirty marker, nested inside [14] conditional
-	#   psvar[16] = git action (e.g. rebase, merge)
-	#   psvar[17] = git arrows (e.g. ⇣⇡)
-	#   psvar[18] = git stash symbol (e.g. ≡)
-	#   psvar[19] = exec time (e.g. 1d 3h 2m 5s)
-	#   psvar[20] = virtualenv/conda/nix-shell name
-	#   psvar[21] = Node.js version (e.g. ⬢22)
-	#   psvar[22] = custom prefix (set by prompt_pure_precustom)
-	#   psvar[23] = custom suffix (set by prompt_pure_precustom)
-	#
-	# Example output:
-	#   prefix ✦ user@host ~/Code/pure main* rebase ⇣⇡ ≡ ⬢22 3s suffix
-	#   myenv ❯
-	#
-	# Preprompt line: each %(NV..) section only renders when its psvar is non-empty.
-	PROMPT='%(22V.%F{$prompt_pure_colors[custom:prefix]}%22v%f .)'
-	PROMPT+='%(12V.%F{$prompt_pure_colors[suspended_jobs]}%12v%f .)'
-	local hostname_part=''
-	if (( prompt_pure_state[show_host] )); then
-		hostname_part='%F{$prompt_pure_colors[host]}@%m%f'
-	fi
-	PROMPT+='%(13V.%F{$prompt_pure_colors['"${prompt_pure_state[user_color]:-user}"']}%n%f'"${hostname_part}"' .)'
-	prompt_pure_set_path_separator
-	PROMPT+='${${prompt_pure_path_separator_dimmed:+$(prompt_pure_render_dimmed_path)}:-${prompt_pure_path_segment}}'
-	PROMPT+='%(14V. %F{${prompt_pure_git_branch_color}}%14v%(15V.%F{$prompt_pure_colors[git:dirty]}%15v.)%f.)'
-	PROMPT+='%(16V. %F{$prompt_pure_colors[git:action]}%16v%f.)'
-	PROMPT+='%(17V. %F{$prompt_pure_colors[git:arrow]}%17v%f.)'
-	PROMPT+='%(18V. %F{$prompt_pure_colors[git:stash]}%18v%f.)'
-	PROMPT+='%(21V. %F{$prompt_pure_colors[node_version]}%21v%f.)'
-	PROMPT+='%(19V. %F{$prompt_pure_colors[execution_time]}%19v%f.)'
-	PROMPT+='%(23V. %F{$prompt_pure_colors[custom:suffix]}%23v%f.)'
+	# A two-line, box-drawing prompt. The preprompt (top line: path, git, etc.)
+	# is assembled dynamically in prompt_pure_preprompt_render; here we set only
+	# the command line itself — the bottom corner, coloured by the previous
+	# command's exit code. RPROMPT (the timestamp) is managed per-render too.
+	PROMPT='$(prompt_pure_colour_for_exit_code)'$PROMPT_PREFIX_BOTTOM'%f '
 
-	# Newline separating preprompt from prompt.
-	PROMPT+='${prompt_newline}'
-
-	# Prompt line: virtualenv and prompt symbol.
-	PROMPT+='%(20V.%F{$prompt_pure_colors[virtualenv]}%20v%f .)'
-	# Prompt symbol: turns red if the previous command didn't exit with 0.
-	local prompt_indicator='%(?.%F{$prompt_pure_colors[prompt:success]}.%F{$prompt_pure_colors[prompt:error]})${prompt_pure_state[prompt]}%f '
-	PROMPT+=$prompt_indicator
-
-	# Indicate continuation prompt by … and use a darker color for it.
-	PROMPT2='%F{$prompt_pure_colors[prompt:continuation]}… %(1_.%_ .%_)%f'$prompt_indicator
+	# Continuation prompt.
+	PROMPT2='%F{242}… %(1_.%_ .%_)%f $(prompt_pure_colour_for_exit_code)'$PROMPT_PREFIX_BOTTOM'%f '
 
 	# Store prompt expansion symbols for in-place expansion via (%). For
 	# some reason it does not work without storing them in a variable first.
@@ -1238,6 +1257,18 @@ prompt_pure_setup() {
 	# Guard against pyenv-virtualenv changing the PS1 prompt
 	# (we manually insert the env when it's available).
 	export PYENV_VIRTUALENV_DISABLE_PROMPT=1
+
+	# Show username@host when on SSH; root in white.
+	typeset -g prompt_pure_username=
+	[[ -n $SSH_CONNECTION ]] && prompt_pure_username='%F{242}%n@%m%f'
+	[[ $UID -eq 0 ]] && prompt_pure_username='%F{white}%n%f%F{242}@%m%f'
+
+	# Custom git arrow glyphs (consumed by prompt_pure_check_git_arrows).
+	: ${PURE_GIT_DOWN_ARROW=$''}
+	: ${PURE_GIT_UP_ARROW=$''}
+
+	# Override accept-line so each executed command line carries a timestamp.
+	zle -N accept-line prompt_pure_accept_line
 }
 
 prompt_pure_setup "$@"
