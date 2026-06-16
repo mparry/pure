@@ -369,12 +369,20 @@ prompt_pure_async_git_dirty() {
 	# Prevent e.g. `git status` from refreshing the index as a side effect.
 	export GIT_OPTIONAL_LOCKS=0
 
+	# Skip scanning each submodule's working tree — the dominant cost of git
+	# status/diff in repos with submodules, and the reason the dirty result used
+	# to land late enough to corrupt the prompt redraw. A submodule checked out
+	# at a different commit than the superproject records still marks the repo
+	# dirty; only changes *inside* a submodule's tree are ignored. Use =all to
+	# ignore submodules entirely.
+	local ignore_submodules='--ignore-submodules=dirty'
+
 	if (( ! detailed )); then
 		if [[ $untracked_dirty = 0 ]]; then
-			command git diff --no-ext-diff --quiet --exit-code || return $?
-			command git diff --no-ext-diff --cached --quiet --exit-code
+			command git diff $ignore_submodules --no-ext-diff --quiet --exit-code || return $?
+			command git diff $ignore_submodules --no-ext-diff --cached --quiet --exit-code
 		else
-			test -z "$(command git status --porcelain -u${untracked_git_mode})"
+			test -z "$(command git status --porcelain $ignore_submodules -u${untracked_git_mode})"
 		fi
 
 		return
@@ -388,7 +396,7 @@ prompt_pure_async_git_dirty() {
 	fi
 
 	local output
-	output=$(command git status --porcelain $u_flag)
+	output=$(command git status --porcelain $ignore_submodules $u_flag)
 	[[ -z $output ]] && return 0
 
 	local has_unstaged=0 has_staged=0 has_untracked=0 line
@@ -580,6 +588,9 @@ prompt_pure_async_init() {
 	prompt_pure_async_inited=1
 	async_register_callback "prompt_pure" prompt_pure_async_callback
 	async_worker_eval "prompt_pure" prompt_pure_async_renice
+
+	# Set up the render-coalescing self-pipe (no-op after the first call).
+	prompt_pure_render_init
 }
 
 prompt_pure_async_tasks() {
@@ -912,8 +923,72 @@ prompt_pure_async_callback() {
 		return
 	fi
 
-	[[ ${prompt_pure_async_render_requested:-$do_render} = 1 ]] && prompt_pure_preprompt_render
+	[[ ${prompt_pure_async_render_requested:-$do_render} = 1 ]] && prompt_pure_async_render
 	unset prompt_pure_async_render_requested
+}
+
+# Set up a self-pipe used to coalesce async-driven prompt redraws. Each async
+# callback that wants a repaint pokes the pipe instead of resetting the prompt
+# directly; a single `zle -F` watcher drains the pipe and repaints once per
+# event-loop turn. This collapses bursts of git results (branch, arrows, tag,
+# dirty) that complete within milliseconds of each other into a single redraw,
+# which avoids the corruption caused by two `zle reset-prompt` calls landing too
+# close together. Safe to call repeatedly; only the first call does the work.
+# The fd and watcher persist for the shell's lifetime (freed on exit). Like
+# pure's own precmd/preexec hooks they are not torn down on a prompt switch,
+# which this single-prompt fork does not use.
+prompt_pure_render_init() {
+	(( ${prompt_pure_render_inited:-0} )) && return
+	(( $+commands[mkfifo] )) || return  # No mkfifo: fall back to direct renders.
+
+	local fifo=${TMPDIR:-/tmp}/prompt-pure-render.$$.$RANDOM
+	command rm -f -- $fifo
+	command mkfifo -- $fifo || return
+
+	# Open read-write so the fifo always has a writer and never reports EOF.
+	if ! exec {prompt_pure_render_fd}<>$fifo; then
+		command rm -f -- $fifo
+		unset prompt_pure_render_fd
+		return
+	fi
+	command rm -f -- $fifo  # Unlink; the open fd keeps the pipe alive.
+
+	zle -F $prompt_pure_render_fd prompt_pure_render_watcher
+	typeset -g prompt_pure_render_inited=1
+}
+
+# `zle -F` handler: drains queued render requests and repaints once.
+prompt_pure_render_watcher() {
+	setopt localoptions noshwordsplit
+	local fd=$1 reason=$2
+
+	if [[ -n $reason ]]; then
+		# Pipe error (hup/nval/err): drop the watcher and fall back to direct
+		# renders from the async callback.
+		zle -F $fd
+		exec {prompt_pure_render_fd}>&-
+		unset prompt_pure_render_fd prompt_pure_render_inited
+		return
+	fi
+
+	# Drain all queued pokes so a burst collapses into a single repaint. A single
+	# sysread reads only one chunk, so loop until the pipe is empty; otherwise
+	# leftover bytes would immediately re-trigger the watcher. The -t 0 poll
+	# returns non-zero once there is nothing left to read.
+	local discard
+	while sysread -i $fd -t 0 discard; do : ; done
+
+	prompt_pure_preprompt_render
+}
+
+# Request a coalesced repaint. Falls back to an immediate render if the
+# self-pipe could not be set up.
+prompt_pure_async_render() {
+	if [[ -n ${prompt_pure_render_fd-} ]]; then
+		print -nu $prompt_pure_render_fd .
+	else
+		prompt_pure_preprompt_render
+	fi
 }
 
 prompt_pure_reset_prompt() {
@@ -927,7 +1002,12 @@ prompt_pure_reset_prompt() {
 		return
 	fi
 
-	zle && zle .reset-prompt
+	# Force the redisplay to complete before returning. Without this, a second
+	# reset arriving a few milliseconds later (a separate async callback) can
+	# preempt a half-painted prompt and eat a line. Async-driven renders are
+	# additionally coalesced via the self-pipe in prompt_pure_render_init, so in
+	# practice only one or two of these flushes happen per command.
+	zle && { zle .reset-prompt; zle -R }
 }
 
 prompt_pure_reset_prompt_symbol() {
@@ -1135,6 +1215,7 @@ prompt_pure_setup() {
 	zmodload zsh/zle
 	zmodload zsh/parameter
 	zmodload zsh/zutil
+	zmodload zsh/system  # sysread, used by the render-coalescing watcher
 
 	autoload -Uz add-zsh-hook
 	autoload -Uz vcs_info
