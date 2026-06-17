@@ -176,19 +176,7 @@ prompt_pure_set_colors() {
 		esac
 	done
 
-	prompt_pure_set_path_separator
-
 	return 0
-}
-
-prompt_pure_set_path_separator() {
-	typeset -g prompt_pure_path_segment="%F{${prompt_pure_colors[path]}}%~%f"
-
-	if zstyle -t ':prompt:pure:path:separator' dim; then
-		typeset -g prompt_pure_path_separator_dimmed=1
-	else
-		typeset -g prompt_pure_path_separator_dimmed=
-	fi
 }
 
 prompt_pure_render_dimmed_path() {
@@ -224,11 +212,18 @@ prompt_pure_preprompt_render() {
 	# repainting a fixed structure, which is what prevents the cd-time redraw
 	# corruption.
 	#   psvar[14]=branch  [15]=dirty  [16]=arrows  [17]=tag/commit
-	#   psvar[18]=conda   [19]=kube
+	#   psvar[18]=conda   [19]=kube  [20]=stash  [21]=node
 	psvar[14]=${prompt_pure_vcs_info[branch]}
 	psvar[15]=${prompt_pure_git_dirty}
 	psvar[16]=${prompt_pure_git_arrows}
 	psvar[17]=${prompt_pure_git_tag_and_commit}
+
+	# Git stash indicator (symbol shown only when stashes exist).
+	psvar[20]=
+	[[ -n $prompt_pure_git_stash && $prompt_pure_git_stash != 0 ]] && psvar[20]=${PURE_GIT_STASH_SYMBOL-≡}
+
+	# Node version (populated synchronously by prompt_pure_async_tasks).
+	psvar[21]=$prompt_pure_node_version
 
 	# Conda environment (only inside a named env under .../envs/...).
 	psvar[18]=
@@ -261,8 +256,8 @@ prompt_pure_preprompt_render() {
 	# Detect changes in the dynamic parts without expanding PROMPT (no subshell).
 	local -a fingerprint_parts=(
 		"${psvar[14]}" "${psvar[15]}" "${psvar[16]}" "${psvar[17]}"
-		"${psvar[18]}" "${psvar[19]}" "${prompt_pure_git_branch_color}"
-		"${RPROMPT}" "${PWD}"
+		"${psvar[18]}" "${psvar[19]}" "${psvar[20]}" "${psvar[21]}"
+		"${prompt_pure_git_branch_color}" "${RPROMPT}" "${PWD}"
 	)
 	local fingerprint="${(pj:|:)${(@qqq)fingerprint_parts}}"
 
@@ -1232,14 +1227,14 @@ prompt_pure_setup() {
 		custom:suffix        242
 		execution_time       yellow
 		git:arrow            cyan
-		git:stash            cyan
+		git:stash            104
 		git:branch           242
 		git:branch:cached    red
 		git:action           yellow
 		git:dirty            218
 		host                 242
 		node_version         green
-		path                 blue
+		path                 12
 		prompt:error         red
 		prompt:success       magenta
 		prompt:continuation  242
@@ -1267,18 +1262,28 @@ prompt_pure_setup() {
 	typeset -gA prompt_pure_vcs_info
 	typeset -g prompt_pure_git_branch_color=$prompt_pure_colors[git:branch]
 
+	# Resolve the Node version glyph once (the version itself is dynamic via psvar).
+	typeset -g prompt_pure_node_symbol
+	zstyle -s ":prompt:pure:environment:node_version" symbol prompt_pure_node_symbol || prompt_pure_node_symbol='⬢'
+
 	# A two-line, box-drawing prompt built ONCE as a static template. Every
 	# dynamic segment is a psvar slot rendered with %(NV.true.false), so empty
 	# slots vanish and `zle reset-prompt` always repaints a fixed structure —
 	# which is what makes the redraw safe. The renderer only sets psvar values.
-	#   psvar 14=branch 15=dirty 16=arrows 17=tag/commit 18=conda 19=kube
+	#   psvar 14=branch 15=dirty 16=arrows 17=tag/commit 18=conda 19=kube 20=stash 21=node
 	PROMPT='$(prompt_pure_colour_for_exit_code)'$PROMPT_PREFIX_TOP        # top corner (exit-code colour)
-	PROMPT+=' %F{12}%~%f'                                                 # path
+	if zstyle -t ':prompt:pure:path:separator' dim; then
+		PROMPT+=' $(prompt_pure_render_dimmed_path)'                      # path (dimmed separators)
+	else
+		PROMPT+=' %F{${prompt_pure_colors[path]}}%~%f'                    # path
+	fi
 	PROMPT+='%(18V. %F{242}%18v%f.)'                                      # conda
 	PROMPT+='%(19V. %F{242}%19v%f.)'                                      # kube
 	PROMPT+='%(14V. %F{${prompt_pure_git_branch_color}}'$''' %14v%(15V.%F{088}%15v.)%f.)'  # branch + dirty
-	PROMPT+='%(16V. %F{104}%16v%f.)'                                      # git arrows
+	PROMPT+='%(16V. %F{104}%16v%f .)'                                     # git arrows
 	PROMPT+='%(17V. %F{${prompt_pure_git_branch_color}}%17v%f.)'          # git tag + commit
+	PROMPT+='%(20V. %F{${prompt_pure_colors[git:stash]}}%20v%f.)'        # git stash
+	PROMPT+='%(21V. %F{${prompt_pure_colors[node_version]}}'"${prompt_pure_node_symbol}"' %21v%f.)'  # node version
 	PROMPT+='${prompt_pure_username}'                                     # user@host (SSH / root)
 	PROMPT+=$prompt_newline                                              # newline → command line
 	PROMPT+='$(prompt_pure_colour_for_exit_code)'$PROMPT_PREFIX_BOTTOM'%f '  # bottom corner + space
