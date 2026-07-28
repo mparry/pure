@@ -110,14 +110,6 @@ prompt_pure_set_title() {
 		/dev/ttyS[0-9]*) return;;
 	esac
 
-	# "restore" pops the title the terminal saved when we last set it, so our
-	# title only persists while a command runs and the title is otherwise left
-	# untouched.
-	if [[ $1 == restore ]]; then
-		print -n $'\e[23;0t'
-		return
-	fi
-
 	# Show hostname if connected via SSH and host display is enabled.
 	local hostname=
 	if (( psvar[13] )) && (( ${prompt_pure_state[show_host]:-1} )); then
@@ -131,10 +123,10 @@ prompt_pure_set_title() {
 		ignore-escape) opts=(-r);;
 	esac
 
-	# Save the current title, then set ours atomically in one print statement so
-	# that it works when XTRACE is enabled. The escapes use $'...' so they remain
-	# real control bytes even under `print -r` (the 'ignore-escape' path).
-	print -n $opts $'\e[22;0t\e]0;'${hostname}${2}$'\a'
+	# Set the title atomically in one print statement so that it works when XTRACE
+	# is enabled. The escapes use $'...' so they remain real control bytes even
+	# under `print -r` (the 'ignore-escape' path).
+	print -n $opts $'\e]0;'${hostname}${2}$'\a'
 }
 
 prompt_pure_preexec() {
@@ -150,10 +142,14 @@ prompt_pure_preexec() {
 
 	typeset -g prompt_pure_cmd_timestamp=$EPOCHSECONDS
 
-	# Show the executed command in the title while a process is active; skip the
-	# helper used to set tab titles so we don't clobber it.
-	if [[ $2 != set-tab-title* ]]; then
-		prompt_pure_set_title 'ignore-escape' "$2"
+	# Show the command as typed ($1) rather than with aliases expanded ($2). $1 is
+	# empty when the history mechanism is off, hence the fallback, and is neither
+	# single-line nor length-capped as $2 is, hence the sanitising: a raw newline
+	# would terminate the title escape early. Skip the helper used to set tab
+	# titles so we don't clobber it.
+	if [[ $1 != set-tab-title* && $2 != set-tab-title* ]]; then
+		local title=${(V)${${1:-$2}//$'\n'/ }}
+		prompt_pure_set_title 'ignore-escape' "${title[1,80]}"
 	fi
 
 	# Disallow Python virtualenv from updating the prompt. Set it to 20 if
@@ -284,8 +280,8 @@ prompt_pure_precmd() {
 		unset prompt_pure_last_cmd_timestamp
 	fi
 
-	# Restore the terminal title we saved before the command ran.
-	prompt_pure_set_title 'restore'
+	# Show the current directory in the title once the command has finished.
+	prompt_pure_set_title 'expand-prompt' '%~'
 
 	# Modify the colors if some have changed..
 	prompt_pure_set_colors
